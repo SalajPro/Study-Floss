@@ -18,7 +18,7 @@
 
 ## ✨ What it does
 
-YouTube is built to keep you scrolling. Study Floss flips it into a calm, single-purpose study tool — and adds the kind of progress loops that actually keep you coming back to **study**, not to the feed.
+YouTube is built to keep you scrolling. Study Floss flips it into a calm, single-purpose study tool, and adds the kind of progress loops that actually keep you coming back to **study**, not to the feed.
 
 ### Focus
 - 🚫 **Distraction blocking** — hides Shorts, the home feed, the up-next/recommendation rail, comments, and trending while Study Mode is on.
