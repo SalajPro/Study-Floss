@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Study Floss — Focus Mode for YouTube",
+  "version": "2.0.0",
+  "description": "Turn YouTube into a focused study zone. Block distractions, run a smart Pomodoro timer, build streaks, earn XP, and stay addicted to focus — not feeds.",
+  "permissions": ["storage", "activeTab", "notifications"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://youtube.com/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Study Floss",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://youtube.com/*"
+      ],
+      "css": ["style.css"],
+      "js": ["shared.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
