@@ -16,7 +16,7 @@
   let taskSaveTimer = null;
 
   const el = {
-    toggle: id("study-mode-toggle"),
+    masterToggle: id("study-mode-toggle"),
     toggleLabel: id("study-mode-label"),
     levelNumber: id("popup-level-number"),
     levelTitle: id("popup-level-title"),
@@ -100,8 +100,8 @@
   }
 
   function bindEvents() {
-    el.toggle.addEventListener("change", async () => {
-      if (el.toggle.checked) {
+    el.masterToggle.addEventListener("change", async () => {
+      if (el.masterToggle.checked) {
         state.studyModeEnabled = true;
         await persistState({ studyModeEnabled: true });
       } else {
@@ -341,7 +341,7 @@
   }
 
   function renderHeader() {
-    el.toggle.checked = state.studyModeEnabled;
+    el.masterToggle.checked = state.studyModeEnabled;
     el.toggleLabel.textContent = state.studyModeEnabled ? "ON" : "OFF";
 
     const info = levelInfo(stats.xp);

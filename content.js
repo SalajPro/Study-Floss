@@ -3,7 +3,7 @@
   const {
     DEFAULTS, STORAGE_KEYS, THEMES, THEME_META, AMBIENT_OPTIONS,
     deriveTimerState, normalizeState, getDuration, formatTime,
-    levelInfo, normalizeText
+    levelInfo, normalizeText, clampNumber
   } = ST;
 
   const RING_CIRCUMFERENCE = 2 * Math.PI * 52;
@@ -13,9 +13,85 @@
   const FULLSCREEN_CLASS = "studyfloss-video-fullscreen";
   const DISTRACTION_CLASS = "studyfloss-distraction";
   const SHORTS_CLASS = "studyfloss-shorts-result";
-  const LEGACY_NON_STUDY_CLASS = "studyfloss-non-study-result";
-  const LEGACY_EMPTY_ID = "studyfloss-filter-empty";
+  const NON_STUDY_CLASS = "studyfloss-non-study-result";
   const QUICK_TOGGLE_ID = "studyfloss-quick-toggle";
+
+  // Search-result cards we classify as study / non-study (study mode + /results only).
+  const RESULT_SELECTOR =
+    "ytd-video-renderer, ytd-grid-video-renderer, ytd-playlist-renderer, " +
+    "ytd-radio-renderer, ytd-movie-renderer, ytd-rich-item-renderer";
+
+  const STUDY_KEYWORD_DICTIONARY = {
+    coreSubjects: [
+      "math", "mathematics", "algebra", "geometry", "trigonometry", "calculus",
+      "precalculus", "statistics", "probability", "arithmetic", "number theory",
+      "linear algebra", "differential equations", "discrete math", "physics",
+      "chemistry", "organic chemistry", "biochemistry", "biology", "botany",
+      "zoology", "genetics", "ecology", "anatomy", "physiology", "microbiology",
+      "earth science", "geology", "astronomy", "environmental science", "science"
+    ],
+    humanities: [
+      "history", "geography", "civics", "political science", "economics",
+      "sociology", "psychology", "philosophy", "literature", "english",
+      "grammar", "writing", "essay", "poetry", "world history", "art history",
+      "research", "anthropology", "linguistics"
+    ],
+    technology: [
+      "computer science", "programming", "coding", "software engineering",
+      "web development", "app development", "data structures", "algorithms",
+      "python", "javascript", "typescript", "java tutorial", "c++", "c sharp",
+      "sql", "database", "machine learning", "deep learning", "data science",
+      "artificial intelligence", "cybersecurity", "networking", "cloud computing",
+      "operating systems", "git tutorial", "linux tutorial", "excel tutorial"
+    ],
+    examsAndSchool: [
+      "exam", "test prep", "revision", "study guide", "practice problems",
+      "past paper", "sample paper", "question paper", "worksheet", "homework",
+      "assignment", "lecture", "lesson", "tutorial", "course", "class",
+      "chapter", "unit", "notes", "explained", "explanation", "problem set",
+      "solutions", "mock test", "quiz", "sat", "act", "gre", "gmat", "ielts",
+      "toefl", "ap calculus", "ap physics", "ap chemistry", "ap biology",
+      "ib math", "ib physics", "ib chemistry", "gcse", "a level", "neet",
+      "jee", "gate", "upsc", "cbse", "icse", "ncert", "grade", "university",
+      "college", "school"
+    ],
+    learningSkills: [
+      "study", "studying", "learn", "learning", "memorize", "flashcards",
+      "mind map", "active recall", "spaced repetition", "pomodoro",
+      "productivity for students", "focus music", "lofi study",
+      "library ambience", "study with me", "white noise", "rain sounds study",
+      "concentration", "reading", "book summary", "academic", "teacher",
+      "professor", "educational"
+    ],
+    languages: [
+      "spanish lesson", "french lesson", "german lesson", "japanese lesson",
+      "korean lesson", "english lesson", "hindi grammar", "sanskrit",
+      "language learning", "vocabulary", "pronunciation"
+    ],
+    professional: [
+      "accounting", "finance course", "business studies", "marketing course",
+      "management lesson", "medical lecture", "nursing", "law lecture",
+      "engineering", "mechanical engineering", "electrical engineering",
+      "civil engineering", "electronics", "architecture", "design theory"
+    ]
+  };
+
+  const STUDY_KEYWORDS = Object.values(STUDY_KEYWORD_DICTIONARY).flat().map(normalizeText);
+
+  const BROAD_STUDY_KEYWORDS = new Set([
+    "class", "school", "college", "grade", "teacher", "student", "students", "university"
+  ].map(normalizeText));
+
+  const STRONG_STUDY_KEYWORDS = STUDY_KEYWORDS.filter((keyword) => !BROAD_STUDY_KEYWORDS.has(keyword));
+
+  const DISTRACTION_KEYWORDS = [
+    "day in my life", "vlog", "prank", "funny", "meme", "memes", "roast",
+    "reaction", "challenge", "dance", "song", "music video", "gaming",
+    "minecraft", "free fire", "bgmi", "movie", "trailer", "web series",
+    "drama", "comedy", "gossip", "viral", "reels", "status", "grwm",
+    "lifestyle", "couple", "dating", "crush", "entertainment", "unboxing",
+    "asmr eating", "mukbang"
+  ].map(normalizeText);
 
   let state = { ...DEFAULTS };
   let stats = ST.defaultStats();
@@ -29,8 +105,15 @@
 
   async function initialize() {
     await waitForDocument();
-    state = deriveTimerState(await getStoredState());
+    const stored = await getStoredState();
     stats = await ST.getStats();
+
+    // If a focus session finished while no tab was actively ticking (tab
+    // closed/backgrounded, or started from the popup), credit it now so
+    // streaks/XP/achievements still count. Deduped by session key.
+    if (stored.studyModeEnabled) await maybeCatchUpCompletion(stored);
+
+    state = deriveTimerState(stored);
 
     if (state.studyModeEnabled) {
       enableStudyMode();
@@ -136,6 +219,8 @@
   function setupNavigationSync() {
     window.addEventListener("yt-navigate-finish", () => {
       if (state.studyModeEnabled) {
+        // New page/search → drop stale classifications and re-evaluate once.
+        resetSearchFilter();
         refreshStudyModeUI();
       } else {
         ensureQuickToggleButton();
@@ -151,9 +236,11 @@
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
+    // Light safety net for lazily injected content; everything below is
+    // incremental + mark-once, so a repeat pass is essentially free.
     navigationFallbackId = window.setInterval(() => {
-      if (state.studyModeEnabled) markShortsSurfaces();
-    }, 4000);
+      if (state.studyModeEnabled) refreshStudyModeUI();
+    }, 5000);
   }
 
   function setupMessageSync() {
@@ -227,10 +314,10 @@
     document.documentElement.classList.remove(FOCUS_CLASS);
     if (document.body) document.body.classList.remove(FOCUS_CLASS, FULLSCREEN_CLASS);
 
-    document.querySelectorAll(`.${DISTRACTION_CLASS}, .${SHORTS_CLASS}, .${LEGACY_NON_STUDY_CLASS}`).forEach((element) => {
-      element.classList.remove(DISTRACTION_CLASS, SHORTS_CLASS, LEGACY_NON_STUDY_CLASS);
+    document.querySelectorAll(`.${DISTRACTION_CLASS}, .${SHORTS_CLASS}, .${NON_STUDY_CLASS}`).forEach((element) => {
+      element.classList.remove(DISTRACTION_CLASS, SHORTS_CLASS, NON_STUDY_CLASS);
     });
-    document.getElementById(LEGACY_EMPTY_ID)?.remove();
+    clearFilterMarkers();
 
     removeTimerWidget();
     ensureQuickToggleButton();
@@ -251,7 +338,7 @@
           <span class="studyfloss-brand-play"></span>
         </div>
         <h2 id="studyfloss-prompt-title">Enter the focus zone?</h2>
-        <p>Hide Shorts, recommendations, comments &amp; the home feed, then start your Pomodoro.</p>
+        <p>Hide Shorts, recommendations, comments &amp; the home feed, filter search to study videos, then start your Pomodoro.</p>
         <div class="studyfloss-prompt-actions">
           <button id="studyfloss-prompt-yes" type="button">Start focusing</button>
           <button id="studyfloss-prompt-no" type="button">Not now</button>
@@ -419,23 +506,53 @@
         <button type="button" data-action="reset">Reset</button>
       </div>
 
-      <div id="studyfloss-widget-settings-panel" class="studyfloss-widget-settings-panel" hidden>
-        <div class="studyfloss-widget-settings-grid">
-          <label for="studyfloss-widget-study-minutes">Focus
-            <input id="studyfloss-widget-study-minutes" type="number" min="1" max="180" step="1"></label>
-          <label for="studyfloss-widget-break-minutes">Break
-            <input id="studyfloss-widget-break-minutes" type="number" min="1" max="60" step="1"></label>
+      <div class="studyfloss-widget-meta">
+        <div class="studyfloss-widget-meta-item">
+          <span id="studyfloss-widget-today" class="studyfloss-widget-meta-value">0m</span>
+          <span class="studyfloss-widget-meta-label">today</span>
         </div>
-        <button type="button" data-action="save-settings">Apply</button>
+        <div class="studyfloss-widget-meta-item">
+          <span id="studyfloss-widget-goal" class="studyfloss-widget-meta-value">0%</span>
+          <span class="studyfloss-widget-meta-label">of goal</span>
+        </div>
+        <div class="studyfloss-widget-meta-item">
+          <span id="studyfloss-widget-sessions" class="studyfloss-widget-meta-value">0</span>
+          <span class="studyfloss-widget-meta-label">sessions</span>
+        </div>
       </div>
 
-      <div class="studyfloss-widget-selects">
-        <label class="studyfloss-widget-theme" for="studyfloss-theme-select">Theme
-          <select id="studyfloss-theme-select"></select>
+      <div id="studyfloss-widget-settings-panel" class="studyfloss-settings-panel" hidden>
+        <div class="studyfloss-field-grid">
+          <label for="studyfloss-w-study">Focus (min)
+            <input id="studyfloss-w-study" type="number" min="1" max="180" step="1"></label>
+          <label for="studyfloss-w-break">Break (min)
+            <input id="studyfloss-w-break" type="number" min="1" max="60" step="1"></label>
+          <label for="studyfloss-w-longbreak">Long break (min)
+            <input id="studyfloss-w-longbreak" type="number" min="5" max="60" step="1"></label>
+          <label for="studyfloss-w-cycle">Long break every
+            <input id="studyfloss-w-cycle" type="number" min="2" max="8" step="1"></label>
+          <label for="studyfloss-w-goal">Daily goal (min)
+            <input id="studyfloss-w-goal" type="number" min="10" max="960" step="5"></label>
+          <label class="studyfloss-field-select" for="studyfloss-theme-select">Theme
+            <select id="studyfloss-theme-select"></select></label>
+        </div>
+        <label class="studyfloss-field-select" for="studyfloss-ambient-select">Ambient sound
+          <select id="studyfloss-ambient-select"></select></label>
+        <label class="studyfloss-toggle-row">
+          <span>Auto-start next timer</span>
+          <span class="studyfloss-mini-switch">
+            <input id="studyfloss-w-autostart" type="checkbox">
+            <span class="studyfloss-mini-track" aria-hidden="true"></span>
+          </span>
         </label>
-        <label class="studyfloss-widget-theme" for="studyfloss-ambient-select">Sound
-          <select id="studyfloss-ambient-select"></select>
+        <label class="studyfloss-toggle-row">
+          <span>Completion sound</span>
+          <span class="studyfloss-mini-switch">
+            <input id="studyfloss-w-sound" type="checkbox">
+            <span class="studyfloss-mini-track" aria-hidden="true"></span>
+          </span>
         </label>
+        <button type="button" data-action="save-settings" class="studyfloss-save-btn">Apply settings</button>
       </div>
     `;
 
@@ -470,6 +587,16 @@
       state.ambientSound = event.target.value;
       persistState({ ambientSound: state.ambientSound });
       syncAmbient();
+    });
+
+    widget.querySelector("#studyfloss-w-autostart").addEventListener("change", (event) => {
+      state.autoStartNext = event.target.checked;
+      persistState({ autoStartNext: state.autoStartNext });
+    });
+
+    widget.querySelector("#studyfloss-w-sound").addEventListener("change", (event) => {
+      state.soundEnabled = event.target.checked;
+      persistState({ soundEnabled: state.soundEnabled });
     });
 
     setupWidgetDragging(widget);
@@ -595,7 +722,7 @@
 
     if (action === "end") { await setStudyMode(false); return; }
     if (action === "toggle-settings") { toggleWidgetSettings(); return; }
-    if (action === "save-settings") { await saveWidgetDurationSettings(); return; }
+    if (action === "save-settings") { await saveWidgetSettings(); return; }
 
     // Single play/pause button.
     if (action === "toggle") action = state.timerRunning ? "pause" : "start";
@@ -649,21 +776,27 @@
     }
   }
 
-  async function saveWidgetDurationSettings() {
+  async function saveWidgetSettings() {
     const widget = document.getElementById("studyfloss-timer");
     if (!widget) return;
-    const studyInput = widget.querySelector("#studyfloss-widget-study-minutes");
-    const breakInput = widget.querySelector("#studyfloss-widget-break-minutes");
-    if (!studyInput || !breakInput) return;
 
-    const studyDurationSeconds = ST.clampNumber(studyInput.value, 1, 180, 25) * 60;
-    const breakDurationSeconds = ST.clampNumber(breakInput.value, 1, 60, 5) * 60;
+    const read = (sel) => widget.querySelector(sel);
+    const studyDurationSeconds = clampNumber(read("#studyfloss-w-study").value, 1, 180, 25) * 60;
+    const breakDurationSeconds = clampNumber(read("#studyfloss-w-break").value, 1, 60, 5) * 60;
+    const longBreakMinutes = clampNumber(read("#studyfloss-w-longbreak").value, 5, 60, 15);
+    const sessionsBeforeLongBreak = clampNumber(read("#studyfloss-w-cycle").value, 2, 8, 4);
+    const dailyGoalMinutes = clampNumber(read("#studyfloss-w-goal").value, 10, 960, 120);
 
     state = deriveTimerState(await getStoredState());
-    state.studyDurationSeconds = studyDurationSeconds;
-    state.breakDurationSeconds = breakDurationSeconds;
+    Object.assign(state, {
+      studyDurationSeconds, breakDurationSeconds, longBreakMinutes,
+      sessionsBeforeLongBreak, dailyGoalMinutes
+    });
 
-    const updates = { studyDurationSeconds, breakDurationSeconds };
+    const updates = {
+      studyDurationSeconds, breakDurationSeconds, longBreakMinutes,
+      sessionsBeforeLongBreak, dailyGoalMinutes
+    };
 
     if (!state.timerRunning) {
       state.remainingSeconds = getDuration(state.timerMode, state);
@@ -676,8 +809,19 @@
     }
 
     await persistState(updates);
-    toggleWidgetSettings();
+    flashApplied(widget);
     renderTimer();
+  }
+
+  function flashApplied(widget) {
+    const button = widget.querySelector("[data-action='save-settings']");
+    if (!button) return;
+    button.textContent = "Saved ✓";
+    button.classList.add("is-saved");
+    window.setTimeout(() => {
+      button.textContent = "Apply settings";
+      button.classList.remove("is-saved");
+    }, 1300);
   }
 
   async function setTimerMode(mode) {
@@ -716,6 +860,22 @@
       window.clearInterval(timerIntervalId);
       timerIntervalId = null;
     }
+  }
+
+  async function maybeCatchUpCompletion(stored) {
+    if (!stored.timerRunning || stored.timerMode !== "study") return;
+    if (!stored.timerEndsAt || stored.timerEndsAt > Date.now()) return;
+
+    const sessionKey = String(stored.timerEndsAt);
+    if (stats.lastSessionKey === sessionKey) return;
+
+    const result = await ST.recordCompletedFocusSession({
+      sessionKey,
+      sessionSeconds: stored.currentTotalSeconds,
+      dailyGoalMinutes: stored.dailyGoalMinutes,
+      now: stored.timerEndsAt
+    });
+    stats = result.stats;
   }
 
   async function handleSessionComplete(before) {
@@ -797,18 +957,20 @@
     widget.classList.add(`studyfloss-theme-${state.selectedTheme}`);
     widget.classList.toggle("is-break", state.timerMode === "break");
 
-    const time = widget.querySelector("#studyfloss-widget-time");
-    const statusText = widget.querySelector("#studyfloss-widget-status");
-    const ring = widget.querySelector("#studyfloss-widget-ring");
-    const themeSelect = widget.querySelector("#studyfloss-theme-select");
-    const ambientSelect = widget.querySelector("#studyfloss-ambient-select");
+    const q = (sel) => widget.querySelector(sel);
+    const time = q("#studyfloss-widget-time");
+    const statusText = q("#studyfloss-widget-status");
+    const ring = q("#studyfloss-widget-ring");
+    const themeSelect = q("#studyfloss-theme-select");
+    const ambientSelect = q("#studyfloss-ambient-select");
     const modeButtons = widget.querySelectorAll("[data-mode]");
-    const toggleButton = widget.querySelector("[data-action='toggle']");
-    const studyInput = widget.querySelector("#studyfloss-widget-study-minutes");
-    const breakInput = widget.querySelector("#studyfloss-widget-break-minutes");
-    const levelEl = widget.querySelector("#studyfloss-widget-level");
-    const streakEl = widget.querySelector("#studyfloss-widget-streak");
-    const cycleEl = widget.querySelector("#studyfloss-widget-cycle");
+    const toggleButton = q("[data-action='toggle']");
+    const levelEl = q("#studyfloss-widget-level");
+    const streakEl = q("#studyfloss-widget-streak");
+    const cycleEl = q("#studyfloss-widget-cycle");
+    const todayEl = q("#studyfloss-widget-today");
+    const goalEl = q("#studyfloss-widget-goal");
+    const sessionsEl = q("#studyfloss-widget-sessions");
 
     if (time) time.textContent = formatTime(state.remainingSeconds);
     if (statusText) statusText.textContent = state.timerMode === "study"
@@ -830,11 +992,27 @@
 
     if (themeSelect && document.activeElement !== themeSelect) themeSelect.value = state.selectedTheme;
     if (ambientSelect && document.activeElement !== ambientSelect) ambientSelect.value = state.ambientSound;
-    if (studyInput && document.activeElement !== studyInput) studyInput.value = String(Math.round(state.studyDurationSeconds / 60));
-    if (breakInput && document.activeElement !== breakInput) breakInput.value = String(Math.round(state.breakDurationSeconds / 60));
+
+    syncSettingInput(q("#studyfloss-w-study"), Math.round(state.studyDurationSeconds / 60));
+    syncSettingInput(q("#studyfloss-w-break"), Math.round(state.breakDurationSeconds / 60));
+    syncSettingInput(q("#studyfloss-w-longbreak"), state.longBreakMinutes);
+    syncSettingInput(q("#studyfloss-w-cycle"), state.sessionsBeforeLongBreak);
+    syncSettingInput(q("#studyfloss-w-goal"), state.dailyGoalMinutes);
+    const autostartInput = q("#studyfloss-w-autostart");
+    const soundInput = q("#studyfloss-w-sound");
+    if (autostartInput) autostartInput.checked = state.autoStartNext;
+    if (soundInput) soundInput.checked = state.soundEnabled;
 
     if (levelEl) levelEl.textContent = `Lv ${levelInfo(stats.xp).level}`;
     if (streakEl) streakEl.textContent = `🔥 ${stats.currentStreak}`;
+
+    const todaySeconds = ST.todayFocusSeconds(stats);
+    if (todayEl) todayEl.textContent = ST.formatDuration(todaySeconds);
+    if (goalEl) {
+      const goalSeconds = Math.max(1, state.dailyGoalMinutes * 60);
+      goalEl.textContent = `${Math.min(100, Math.round((todaySeconds / goalSeconds) * 100))}%`;
+    }
+    if (sessionsEl) sessionsEl.textContent = String(stats.sessionsCompleted);
 
     if (cycleEl) {
       const n = state.sessionsBeforeLongBreak;
@@ -850,9 +1028,16 @@
     });
   }
 
+  function syncSettingInput(input, value) {
+    if (input && document.activeElement !== input) input.value = String(value);
+  }
+
+  /* ---------------- distraction + search filtering ---------------- */
+
   function refreshStudyModeUI() {
     ensureTimerWidget();
     markShortsSurfaces();
+    filterSearchResults();
   }
 
   function scheduleStudyModeRefresh() {
@@ -862,12 +1047,13 @@
       refreshQueued = false;
       ensureTimerWidget();
       markShortsSurfaces();
-    }, 600);
+      filterSearchResults();
+    }, 500);
   }
 
-  // Distraction hiding for the home feed, recommendations, comments, etc. is
-  // handled entirely by static CSS keyed on `.studyfloss-focus-mode`. The only
-  // dynamic work needed is detecting Shorts surfaces (which are content-based).
+  // Most distraction hiding (home feed, recommendations, comments) is static
+  // CSS keyed on `.studyfloss-focus-mode`. Shorts surfaces are content-based,
+  // so we tag them here. Mark-once → repeated passes do no DOM work.
   function markShortsSurfaces() {
     if (!state.studyModeEnabled || !document.body) return;
 
@@ -880,12 +1066,50 @@
     for (const candidate of candidates) {
       if (!hasShortsSignal(candidate)) continue;
       const target = getShortsHideTarget(candidate);
-      // Only touch elements that aren't already marked — keeps this idempotent
-      // so repeated runs cause no DOM churn (and no visible "looping").
       if (target && !shouldKeepElement(target) && !target.classList.contains(SHORTS_CLASS)) {
         target.classList.add(SHORTS_CLASS, DISTRACTION_CLASS);
       }
     }
+  }
+
+  // On the search results page, hide videos that aren't study-related. Each
+  // card is classified exactly once (data-sf-checked) and hidden via a CSS
+  // class — no re-processing, no injected cards, so the page never "reloads".
+  function filterSearchResults() {
+    if (!state.studyModeEnabled || location.pathname !== "/results") return;
+
+    for (const card of safelyQuery(RESULT_SELECTOR)) {
+      if (card.dataset.sfChecked === "1") continue;
+      card.dataset.sfChecked = "1";
+
+      if (shouldKeepElement(card) || card.classList.contains(SHORTS_CLASS)) continue;
+
+      const text = normalizeText(`${card.textContent || ""} ${collectLinks(card)}`);
+      if (!matchesStudyKeyword(text)) card.classList.add(NON_STUDY_CLASS);
+    }
+  }
+
+  function resetSearchFilter() {
+    document.querySelectorAll(`.${NON_STUDY_CLASS}`).forEach((el) => el.classList.remove(NON_STUDY_CLASS));
+    clearFilterMarkers();
+  }
+
+  function clearFilterMarkers() {
+    document.querySelectorAll("[data-sf-checked]").forEach((el) => { delete el.dataset.sfChecked; });
+  }
+
+  function matchesStudyKeyword(text) {
+    const hasStrong = STRONG_STUDY_KEYWORDS.some((keyword) => text.includes(keyword));
+    const hasBroad = STUDY_KEYWORDS.some((keyword) => text.includes(keyword));
+    if (!hasStrong && !hasBroad) return false;
+    if (!hasStrong && DISTRACTION_KEYWORDS.some((keyword) => text.includes(keyword))) return false;
+    return true;
+  }
+
+  function collectLinks(element) {
+    return Array.from(element.querySelectorAll("a[href]"))
+      .map((link) => `${link.getAttribute("href") || ""} ${link.getAttribute("title") || ""}`)
+      .join(" ");
   }
 
   function getShortsHideTarget(element) {

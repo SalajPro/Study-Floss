@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Study Floss — Focus Mode for YouTube",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Turn YouTube into a focused study zone. Block distractions, run a smart Pomodoro timer, build streaks, earn XP, and stay addicted to focus — not feeds.",
   "permissions": ["storage", "activeTab", "notifications"],
   "host_permissions": [
