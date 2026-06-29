@@ -34,7 +34,7 @@
         "https://youtube.com/*"
       ],
       "css": ["style.css"],
-      "js": ["shared.js", "content.js"],
+      "js": ["shared.js", "ui.js", "content.js"],
       "run_at": "document_idle"
     }
   ]
